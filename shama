@@ -1,0 +1,430 @@
+#!/usr/bin/env node
+/**
+ * Uso: llama [args...] (o solo ejecuta sin argumentos para obtener por defecto)
+ */
+
+import { spawn, execSync } from "node:child_process";
+import { styleText } from "node:util";
+import { env, exit } from "node:process";
+import { readdirSync, createReadStream, statSync } from "node:fs";
+import { createInterface } from "node:readline";
+
+const { HOME } = env;
+
+// Parámetros configurables
+
+const CMD = "llama-server";                                       // Ruta del llama-server (default: PATH)
+const OPENCODE_PATH = `${HOME}/.config/opencode/opencode.json`;   // Ruta de config de OpenCode
+const MODEL_PATH = `${HOME}/.models/gguf/`;                       // Ruta de los modelos .gguf
+const CTX_SIZE = "128000";                                        // Tamaño del contexto
+const PORT = "8999";                                              // Puerto del servidor de llama.cpp
+
+let ggufFiles = [];
+
+async function selectModel(files) {
+  console.log(styleText("bold", "\nModelos disponibles:\n"));
+  files.forEach((f, i) => {
+	  const sizeGB = (statSync(`${MODEL_PATH}${f}`).size / 1e9).toFixed(2);
+	  console.log(`  ${styleText("cyan", String(i + 1))}. ${f} ${styleText("dim", `(${sizeGB} GB)`)}`);
+  });
+  console.log(`  ${styleText("cyan", "0")}. Salir`);
+
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+
+  return new Promise((resolve) => {
+    const ask = () => {
+      rl.question(
+        `\n${styleText("bold", `Elige un modelo [1-${files.length}]: `)}`,
+        (answer) => {
+          const n = parseInt(answer.trim(), 10);
+          if (n === 0) {
+            exit(0);
+          } else if (n >= 1 && n <= files.length) {
+            rl.close();
+            resolve(files[n - 1]);
+          } else {
+            console.log(styleText("yellow", `Introduce un número entre 1 y ${files.length}.`));
+            ask();
+          }
+        }
+      );
+    };
+    ask();
+  });
+}
+
+async function resolveModel() {
+  if (env.MODEL) {
+    return `${MODEL_PATH}${env.MODEL}`;
+  }
+
+  try {
+    ggufFiles = readdirSync(MODEL_PATH).filter((f) => f.endsWith(".gguf"));
+  } catch {
+    console.error(styleText("red", `No se pudo leer MODEL_PATH: ${MODEL_PATH}`));
+    exit(1);
+  }
+
+  if (ggufFiles.length === 0) {
+    console.error(styleText("yellow", `No hay archivos .gguf en ${MODEL_PATH}`));
+    exit(1);
+  }
+
+  if (ggufFiles.length === 1) {
+    console.log(styleText("cyan", `Usando único modelo disponible: ${ggufFiles[0]}`));
+    return `${MODEL_PATH}${ggufFiles[0]}`;
+  }
+
+  const chosen = await selectModel(ggufFiles);
+  console.log(styleText("green", `\nModelo seleccionado: ${chosen}\n`));
+  return `${MODEL_PATH}${chosen}`;
+}
+
+function syncModelsToOpencode(files) {
+  const tmpPath = `${OPENCODE_PATH}.tmp`;
+
+  const modelEntries = files
+    .map((f) => {
+      const modelId = f.replace(/\.gguf$/, "");
+      return `{"${modelId}": {"name": "${modelId}"}}`;
+    })
+    .join(" * ");
+
+  const jqFilter = `.provider.llamacpp.models = ((${modelEntries}) * .provider.llamacpp.models)`;
+
+  try {
+    execSync(`jq '${jqFilter}' "${configPath}" > "${tmpPath}" && mv "${tmpPath}" "${configPath}"`, { stdio: "pipe" });
+    console.log(styleText("dim", `Config opencode actualizada: ${configPath}`));
+  } catch (e) {
+    execSync(`rm -f "${tmpPath}"`);
+    console.error(styleText("yellow", `No se pudo actualizar opencode.json: ${e.message}`));
+  }
+}
+
+const MODEL = await resolveModel();
+syncModelsToOpencode(ggufFiles);
+
+const ARGS = process.argv.slice(2).length
+  ? process.argv.slice(2)
+  : [
+      "-m", MODEL,
+//		"--mmproj", "mmproj-F16.gguf",    // Image/Vision support
+      "-c", CTX_SIZE,
+      "-ngl", "999",
+      "-fa", "on",
+      "--no-mmap",
+      "-t", "8",
+      "-tb", "16",
+      "-b", "2048",
+      "-ub", "512",
+      "--n-cpu-moe", "8",
+      "--cont-batching",
+      "--cache-reuse", "256",
+      "--jinja",
+      "--port", PORT,
+		// Speculative (experimental)
+		// "--spec-type", "ngram-mod",
+		// "--spec-ngram-size-n", "24",
+		// "--draft-min", "8",
+		// "--draft-max", "32"
+    ];
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+const dim    = (s) => styleText("dim",     s);
+const bold   = (s) => styleText("bold",    s);
+const cyan   = (s) => styleText("cyan",    s);
+const green  = (s) => styleText("green",   s);
+const yellow = (s) => styleText("yellow",  s);
+const red    = (s) => styleText("red",     s);
+const blue   = (s) => styleText("blue",    s);
+const magenta= (s) => styleText("magenta", s);
+const white  = (s) => styleText("white",   s);
+const gray   = (s) => styleText("gray",    s);
+
+function now() {
+  return dim(`[${new Date().toLocaleTimeString()}]`);
+}
+
+function hr(char = "─", len = 60) {
+  return dim(char.repeat(len));
+}
+
+// ─── Line classifier & formatter ─────────────────────────────────────────────
+
+function formatLine(raw) {
+  const line = raw.trimEnd();
+  if (!line) return null;
+
+  // ── CUDA / GPU info ──────────────────────────────────────────────────────
+  if (/ggml_cuda_init/.test(line)) {
+    const m = line.match(/found (\d+) CUDA devices.*?VRAM: (\S+)/);
+    if (m) return `${now()} 🎮 ${bold(cyan("GPU"))}  ${m[1]} dispositivo(s) • VRAM total: ${green(m[2])}`;
+  }
+  if (/Device \d+:/.test(line)) {
+    const m = line.match(/Device (\d+): (.+?), compute capability ([\d.]+).*?VRAM: (\S+)/);
+    if (m) return `${now()} 🔷 ${cyan(`GPU #${m[1]}`)}  ${bold(m[2])}  CC ${m[3]}  VRAM: ${green(m[4])}`;
+  }
+
+  // ── Model loading ────────────────────────────────────────────────────────
+  if (/srv.*load_model.*loading model/.test(line)) {
+    const m = line.match(/loading model '(.+)'/);
+    if (m) {
+      const short = m[1].split("/").pop();
+      return `\n${hr()}\n${now()} 📦 ${bold(yellow("Cargando modelo"))}  ${white(short)}\n${hr()}`;
+    }
+  }
+  if (/model loaded/.test(line)) {
+    return `${now()} ✅ ${bold(green("Modelo cargado correctamente"))}`;
+  }
+  if (/llama_params_fit.*projected to use/.test(line)) {
+    const m = line.match(/projected to use (\S+ MiB).*?(\S+ MiB) of free/);
+    if (m) return `${now()} 💾 ${yellow("Uso estimado")}  ${bold(m[1])} de ${m[2]} libres`;
+  }
+  if (/llama_params_fit.*will leave/.test(line)) {
+    const m = line.match(/will leave (\S+ MiB)/);
+    if (m) return `${now()} ✔  ${green("VRAM libre tras carga:")} ${bold(m[1])}`;
+  }
+  if (/load_tensors.*offload/.test(line)) {
+    const m = line.match(/offloading (\d+).*?to GPU/);
+    if (m) return `${now()} ⬆  ${cyan("Offload GPU")}  ${bold(m[1])} capas → GPU`;
+  }
+  if (/offloaded (\d+)\/(\d+)/.test(line)) {
+    const m = line.match(/offloaded (\d+)\/(\d+)/);
+    if (m) return `${now()} ✅ ${green("Offload completado")}  ${bold(`${m[1]}/${m[2]}`)} capas en GPU`;
+  }
+  if (/model buffer size/.test(line)) {
+    const m = line.match(/(CUDA\w*|CPU[\w_]*)\s+model buffer size =\s+(\S+ \S+)/);
+    if (m) return `${now()} 📊 ${blue("Buffer modelo")}  ${bold(m[1].padEnd(10))} → ${bold(green(m[2]))}`;
+  }
+
+  // ── Context / KV cache ───────────────────────────────────────────────────
+  if (/llama_context:.*n_ctx\b/.test(line)) {
+    const m = line.match(/n_ctx\s*=\s*(\d+)/);
+    if (m) return `${now()} 🧠 ${magenta("Contexto")}  n_ctx = ${bold(m[1])} tokens`;
+  }
+  if (/llama_kv_cache.*size =/.test(line)) {
+    const m = line.match(/size =\s+(\S+ MiB).*?(\d+) cells.*?(\d+) layers/);
+    if (m) return `${now()} 🗄  ${magenta("KV Cache")}  ${bold(m[1])}  (${m[2]} celdas, ${m[3]} capas)`;
+  }
+
+  // ── Flash attention / settings ───────────────────────────────────────────
+  if (/flash_attn\s*=\s*enabled/.test(line)) {
+    return `${now()} ⚡ ${cyan("Flash Attention")}  ${bold(green("activada"))}`;
+  }
+
+  // ── Slots ────────────────────────────────────────────────────────────────
+  if (/srv.*load_model.*initializing slots/.test(line)) {
+    const m = line.match(/n_slots = (\d+)/);
+    if (m) return `${now()} 🔲 ${yellow("Slots paralelos")}  ${bold(m[1])} slots inicializados`;
+  }
+  if (/slot.*load_model.*new slot/.test(line)) {
+    const m = line.match(/id\s+(\d+).*n_ctx = (\d+)/);
+    if (m) return `${now()} ${dim(`  └ Slot #${m[1]}`)}  ctx = ${m[2]}`;
+  }
+
+  // ── Server ready ─────────────────────────────────────────────────────────
+  if (/server is listening/.test(line)) {
+    const m = line.match(/http:\/\/[\d.:]+/);
+    const url = m ? m[0] : "";
+    return `\n${hr("═")}\n${now()} 🚀 ${bold(green("Servidor listo!"))}  ${bold(cyan(url))}\n${hr("═")}\n`;
+  }
+
+  // ── Slots idle/active ────────────────────────────────────────────────────
+  if (/all slots are idle/.test(line)) {
+    return `${now()} 💤 ${dim("Todos los slots en reposo — esperando peticiones")}`;
+  }
+  if (/slot.*task.*started/.test(line)) {
+    return `${now()} ▶  ${green("Slot activo")}  ${dim(line.trim())}`;
+  }
+
+  // ── Warnings ─────────────────────────────────────────────────────────────
+  if (/n_ctx_seq.*<.*n_ctx_train/.test(line)) {
+    const m = line.match(/n_ctx_seq \((\d+)\).*n_ctx_train \((\d+)\)/);
+    if (m) return `${now()} ⚠  ${yellow("Aviso")}  ctx activo ${bold(m[1])} < máx entrenado ${bold(m[2])} (capacidad no completa)`;
+  }
+  if (/speculative decoding not supported/.test(line)) {
+    return `${now()} ℹ  ${dim("Speculative decoding no disponible en este contexto")}`;
+  }
+
+  // ── Warmup ───────────────────────────────────────────────────────────────
+  if (/warming up/.test(line)) {
+    return `${now()} 🔥 ${yellow("Warmup")}  calentando el modelo...`;
+  }
+
+  // ── Prompt cache ─────────────────────────────────────────────────────────
+  if (/prompt cache is enabled/.test(line)) {
+    const m = line.match(/size limit: (.+)/);
+    if (m) return `${now()} 💾 ${cyan("Prompt cache")}  habilitado  (límite: ${bold(m[1])})`;
+  }
+
+  // ── Build / system info (collapse into single lines) ─────────────────────
+  if (/^build_info:/.test(line)) {
+    const m = line.match(/b(\d+)-(\w+)/);
+    if (m) return `${now()} 🔧 ${dim("Build")}  #${m[1]}  ${dim(m[2])}`;
+  }
+  if (/^system_info:/.test(line)) {
+    const m = line.match(/n_threads = (\d+).*n_threads_batch = (\d+)/);
+    if (m) return `${now()} 🖥  ${dim("CPU threads")}  inferencia: ${bold(m[1])}  batch: ${bold(m[2])}`;
+  }
+
+  // ── print_info: model params ─────────────────────────────────────────────
+  if (/print_info:.*model params/.test(line)) {
+    const m = line.match(/=\s+(.+)/);
+    if (m) return `${now()} 📐 ${cyan("Parámetros")}  ${bold(m[1].trim())}`;
+  }
+  if (/print_info:.*file size/.test(line)) {
+    const m = line.match(/=\s+(.+)/);
+    if (m) return `${now()} 📁 ${cyan("Tamaño fichero")}  ${bold(m[1].trim())}`;
+  }
+  if (/print_info:.*file type/.test(line)) {
+    const m = line.match(/=\s+(.+)/);
+    if (m) return `${now()} 🗜  ${cyan("Cuantización")}  ${bold(m[1].trim())}`;
+  }
+  if (/print_info:.*general\.name/.test(line)) {
+    const m = line.match(/=\s+(.+)/);
+    if (m) return `${now()} 🤖 ${bold(cyan("Modelo"))}  ${bold(white(m[1].trim()))}`;
+  }
+  if (/print_info:.*n_ctx_train/.test(line)) {
+    const m = line.match(/=\s+(\d+)/);
+    if (m) return `${now()} 📏 ${cyan("Ctx máx entrenado")}  ${bold(m[1])} tokens`;
+  }
+
+  // ── Fused ops ────────────────────────────────────────────────────────────
+  if (/fused Gated Delta Net.*enabled/.test(line)) {
+    const m = line.match(/fused (.+?) enabled/);
+    if (m) return `${now()} 🔗 ${dim("Fusión")}  ${m[1]} ${green("✓")}`;
+  }
+
+  // ── Errores ──────────────────────────────────────────────────────────────
+  if (/error|fatal|failed/i.test(line)) {
+    return `${now()} ❌ ${bold(red("Error"))}  ${red(line.trim())}`;
+  }
+
+  // ── Líneas de metadata/tensor (muy verbosas) → suprimir ─────────────────
+  if (
+    /llama_model_loader: - kv/.test(line) ||
+    /llama_model_loader: - type/.test(line) ||
+    /llama_model_loader: Dumping/.test(line) ||
+    /^\.+$/.test(line.trim())                   // barra de progreso de puntos
+  ) {
+    return null; // silenciar
+  }
+
+  // ── Resto: mostrar en gris tenue ─────────────────────────────────────────
+  return `${now()} ${gray(line.trim())}`;
+}
+
+// ─── Spinner para la carga ────────────────────────────────────────────────────
+
+const SPINNER_FRAMES = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"];
+let spinnerIdx = 0;
+let spinnerInterval = null;
+let modelLoading = false;
+
+function startSpinner(msg) {
+  modelLoading = true;
+  process.stdout.write("\n");
+  spinnerInterval = setInterval(() => {
+    const frame = cyan(SPINNER_FRAMES[spinnerIdx++ % SPINNER_FRAMES.length]);
+    process.stdout.write(`\r  ${frame} ${yellow(msg)}   `);
+  }, 80);
+}
+
+function stopSpinner() {
+  if (spinnerInterval) {
+    clearInterval(spinnerInterval);
+    spinnerInterval = null;
+    process.stdout.write("\r" + " ".repeat(60) + "\r");
+  }
+  modelLoading = false;
+}
+
+// ─── Banner ───────────────────────────────────────────────────────────────────
+
+function printBanner() {
+  console.log();
+  console.log(bold(cyan("  ███████╗██╗  ██╗ █████╗ ███╗   ███╗ █████╗ ")));
+  console.log(bold(cyan("  ██╔════╝██║  ██║██╔══██╗████╗ ████║██╔══██╗")));
+  console.log(bold(cyan("  ███████╗███████║███████║██╔████╔██║███████║")));
+  console.log(bold(cyan("  ╚════██║██╔══██║██╔══██║██║╚██╔╝██║██╔══██║")));
+  console.log(bold(cyan("  ███████║██║  ██║██║  ██║██║ ╚═╝ ██║██║  ██║")));
+  console.log(bold(cyan("  ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝  ╚═╝")));
+  console.log();
+  console.log(`  ${bold("llama-server")} ${dim("wrapper")}  •  ${dim(new Date().toLocaleString())}`);
+  console.log(`  ${dim("Comando:")} ${gray("llama-server " + ARGS.join(" "))}`);
+  console.log();
+}
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
+
+printBanner();
+
+const child = spawn(CMD, ARGS, {
+  detached: false,
+  stdio: ["ignore", "pipe", "pipe"],
+});
+
+let buffer = "";
+
+function processChunk(chunk) {
+  buffer += chunk.toString();
+  const lines = buffer.split("\n");
+  buffer = lines.pop(); // guardar línea incompleta
+
+  for (const line of lines) {
+    // Gestión del spinner durante carga de tensores
+    if (/srv.*load_model.*loading model/.test(line)) {
+      startSpinner("Cargando pesos del modelo...");
+    }
+    if (/main: model loaded/.test(line) || /srv.*load_model.*initializing slots/.test(line)) {
+      stopSpinner();
+    }
+
+    const formatted = formatLine(line);
+    if (formatted !== null) {
+      if (modelLoading) {
+        // Imprimir debajo del spinner sin romperlo visualmente
+        process.stdout.write("\r" + " ".repeat(60) + "\r");
+        console.log(formatted);
+        // Reescribir el spinner en la siguiente iteración automáticamente
+      } else {
+        console.log(formatted);
+      }
+    }
+  }
+}
+
+child.stdout.on("data", processChunk);
+child.stderr.on("data", processChunk);
+
+child.on("error", (err) => {
+  stopSpinner();
+  console.error(`\n${now()} ❌ ${bold(red("No se pudo iniciar llama-server:"))} ${red(err.message)}`);
+  console.error(dim("  ¿Está llama-server en el PATH?"));
+  exit(1);
+});
+
+child.on("close", (code) => {
+  stopSpinner();
+  if (buffer.trim()) {
+    const formatted = formatLine(buffer);
+    if (formatted) console.log(formatted);
+  }
+  console.log();
+  if (code === 0 || code === null) {
+    console.log(`${now()} 🛑 ${yellow("Servidor detenido")} (código ${code ?? "señal"})`);
+  } else {
+    console.log(`${now()} ❌ ${bold(red(`Servidor terminó con error`))} (código ${code})`);
+  }
+  exit(code ?? 0);
+});
+
+// Propagar señales al proceso hijo
+for (const sig of ["SIGINT", "SIGTERM"]) {
+  process.on(sig, () => {
+    stopSpinner();
+    console.log(`\n${now()} 🛑 ${yellow(`Recibido ${sig}, cerrando...`)}`);
+    child.kill(sig);
+  });
+}
