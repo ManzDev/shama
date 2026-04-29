@@ -93,8 +93,8 @@ function syncModelsToOpencode(files) {
   const jqFilter = `.provider.llamacpp.models = ((${modelEntries}) * .provider.llamacpp.models)`;
 
   try {
-    execSync(`jq '${jqFilter}' "${configPath}" > "${tmpPath}" && mv "${tmpPath}" "${configPath}"`, { stdio: "pipe" });
-    console.log(styleText("dim", `Config opencode actualizada: ${configPath}`));
+    execSync(`jq '${jqFilter}' "${OPENCODE_PATH}" > "${tmpPath}" && mv "${tmpPath}" "${OPENCODE_PATH}"`, { stdio: "pipe" });
+    console.log(styleText("dim", `Config opencode actualizada: ${OPENCODE_PATH}`));
   } catch (e) {
     execSync(`rm -f "${tmpPath}"`);
     console.error(styleText("yellow", `No se pudo actualizar opencode.json: ${e.message}`));
