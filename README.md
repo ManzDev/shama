@@ -50,7 +50,7 @@ sudo apt install git build-essential cmake libssl-dev wget jq
 git clone https://github.com/ggml-org/llama.cpp.git
 cd llama.cpp
 cmake -B build -DGGML_CUDA=ON
-cmake --build build --config Release -j 8
+cmake --build build --config Release -j$(nproc)
 ```
 
 Una vez compilado, los archivos se habrán generado en `build/bin`. Para instalarlos puedes hacer lo siguiente:
